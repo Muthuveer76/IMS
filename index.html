@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IMS | Internship Management System</title>
+    <meta name="description"
+        content="A comprehensive Internship Management System for academic institutions, automating company verification and student OD approvals.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <!-- Supabase SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <!-- EmailJS SDK -->
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+    <script type="text/javascript">
+        (function() {
+            emailjs.init({
+              publicKey: "u4-jbrPhL3qn0sP9J",
+            });
+        })();
+    </script>
+</head>
+
+<body>
+    <div id="app">
+        <!-- Modernized Login Screen -->
+        <section id="login-screen" class="screen active">
+            <div class="login-card">
+                <div class="login-sidebar">
+                    <div>
+                        <div class="logo-circle"
+                            style="width: 60px; height: 60px; background: var(--accent); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 2rem; margin-bottom: 20px;">
+                            🏛️</div>
+                        <h1>IMS Portal</h1>
+                        <p>Internship Management<br>System</p>
+                    </div>
+                    <div style="font-size: 0.8rem; opacity: 0.7;">© 2026 Academic Excellence Initiative</div>
+                </div>
+                <div class="login-main">
+                    <h2 id="auth-title">Sign In</h2>
+                    <p id="auth-desc" style="color: var(--text-muted); margin-bottom: 20px;">Enter your credentials to
+                        access the portal</p>
+
+                    <form id="login-form" style="margin-top: 20px;">
+                        <div style="margin-bottom: 20px;">
+                            <label
+                                style="display: block; font-size: 0.8rem; font-weight: 700; margin-bottom: 8px;">EMAIL
+                                ADDRESS</label>
+                            <input type="email" id="email" placeholder="alex@univ.edu"
+                                style="width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-light);"
+                                required>
+                        </div>
+                        <div style="margin-bottom: 20px; position: relative;">
+                            <label
+                                style="display: block; font-size: 0.8rem; font-weight: 700; margin-bottom: 8px;">PASSWORD</label>
+                            <input type="password" id="password" placeholder="••••••••"
+                                style="width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-light);"
+                                required>
+                            <span class="pass-toggle" onclick="UI.togglePass('password')"
+                                style="position: absolute; right: 12px; top: 36px; cursor: pointer; opacity: 0.4;">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path
+                                        d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24">
+                                    </path>
+                                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                                </svg>
+                            </span>
+                        </div>
+                        <button type="submit" class="ui-btn ui-btn-primary" style="width: 100%;">Sign In</button>
+                    </form>
+
+                    <form id="signup-form" style="margin-top: 20px; display: none;">
+                        <div style="margin-bottom: 20px;">
+                            <label style="display: block; font-size: 0.8rem; font-weight: 700; margin-bottom: 8px;">FULL
+                                NAME</label>
+                            <input type="text" id="signup-name" placeholder="Alex Rivet"
+                                style="width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-light);"
+                                required>
+                        </div>
+                        <div style="margin-bottom: 20px;">
+                            <label
+                                style="display: block; font-size: 0.8rem; font-weight: 700; margin-bottom: 8px;">ROLE</label>
+                            <select id="signup-role"
+                                style="width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-light);"
+                                required>
+                                <option value="student">Student</option>
+                                <option value="mentor">Mentor</option>
+                                <option value="hod">HOD</option>
+                                <option value="tpo">TPO</option>
+                                <option value="coordinator">Internship Coordinator</option>
+                            </select>
+                        </div>
+                        <div style="margin-bottom: 20px;">
+                            <label
+                                style="display: block; font-size: 0.8rem; font-weight: 700; margin-bottom: 8px;">EMAIL
+                                ADDRESS</label>
+                            <input type="email" id="signup-email" placeholder="alex@univ.edu"
+                                style="width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-light);"
+                                required>
+                        </div>
+                        <div style="margin-bottom: 20px; position: relative;">
+                            <label
+                                style="display: block; font-size: 0.8rem; font-weight: 700; margin-bottom: 8px;">PASSWORD</label>
+                            <input type="password" id="signup-password" placeholder="••••••••"
+                                style="width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-light);"
+                                required>
+                            <span class="pass-toggle" onclick="UI.togglePass('signup-password')"
+                                style="position: absolute; right: 12px; top: 36px; cursor: pointer; opacity: 0.4;">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path
+                                        d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24">
+                                    </path>
+                                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                                </svg>
+                            </span>
+                        </div>
+                        <button type="submit" class="ui-btn ui-btn-primary" style="width: 100%;">Create Account</button>
+                    </form>
+
+                    <div style="margin-top: 20px; text-align: center; font-size: 0.9rem;">
+                        <a href="#" id="toggle-auth"
+                            style="color: var(--primary); text-decoration: none; font-weight: 600;">Need an account?
+                            Sign up</a>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Dashboard -->
+        <section id="dashboard-screen" class="screen">
+            <aside class="sidebar">
+                <div class="sidebar-logo">IMS</div>
+                <nav id="nav-menu">
+                    <!-- Dynamic Menu Injected by app.js -->
+                </nav>
+                <div style="margin-top: auto; padding: 20px;">
+                    <button id="logout-btn" class="ui-btn ui-btn-ghost"
+                        style="width:100%; border-color: rgba(255,255,255,0.2); color:white;">Logout</button>
+                </div>
+            </aside>
+
+            <main class="content">
+                <header class="header">
+                    <div class="header-left" style="display:flex; align-items:center; gap:20px; flex:1;">
+                        <button id="menu-toggle" class="menu-toggle">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="3" y1="12" x2="21" y2="12"></line>
+                                <line x1="3" y1="6" x2="21" y2="6"></line>
+                                <line x1="3" y1="18" x2="21" y2="18"></line>
+                            </svg>
+                        </button>
+                        <div>
+                            <h2 id="view-title">Dashboard Overview</h2>
+                            <p id="user-welcome" style="font-size: 0.9rem; color: var(--text-muted);">Welcome back, User
+                            </p>
+                        </div>
+                        <div style="flex:1; max-width:400px; position:relative;">
+                            <input type="text" id="global-search" placeholder="Search companies, applications..."
+                                style="width:100%; padding:10px 15px 10px 35px; border-radius:30px; border:1px solid var(--border); background:var(--bg-light); font-size:0.85rem;">
+                            <span
+                                style="position:absolute; left:12px; top:50%; transform:translateY(-50%); opacity:0.5;">🔍</span>
+                        </div>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 20px;">
+                        <div class="notif-bell" id="bell-icon">
+                            🔔 <span class="notif-count" id="header-notif-count">0</span>
+                        </div>
+                        <div id="user-pill"
+                            style="display:flex; align-items:center; gap:10px; padding:6px 16px; background:var(--bg-light); border-radius:30px;">
+                            <div id="user-avatar"
+                                style="width:30px; height:30px; background:var(--accent); border-radius:50%; display:flex; align-items:center; justify-content:center; color:white; font-weight:700;">
+                                U</div>
+                            <span id="user-role-label"
+                                style="font-size:0.8rem; font-weight:700; text-transform:uppercase;">Student</span>
+                        </div>
+                    </div>
+                </header>
+
+                <div id="page-content" style="padding: 40px;">
+                    <!-- Content injected by app.js -->
+                </div>
+            </main>
+        </section>
+    </div>
+
+    <div id="toast-container" style="position:fixed; bottom:20px; right:20px; z-index:1000;"></div>
+
+    <script src="app.js" type="module"></script>
+</body>
+
+</html>
