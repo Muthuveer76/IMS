@@ -89,7 +89,7 @@ async function fetchUserFromDB(email) {
         try {
             const { data, error } = await supabase
                 .from('users')
-                .select('role, name')
+                .select('role, name, mentor_email')
                 .eq('email', email)
                 .single();
 
@@ -214,6 +214,7 @@ const ApproverMap = { 'mentor': mentorHandler, 'hod': hodHandler, 'tpo': tpoHand
 const Store = (() => {
     let _user = null;
     let _notifs = [];
+    let _allUsers = [];
     let _companies = [
         { id: 'C01', name: 'NVIDIA', email: 'careers@nvidia.com', state: new WorkflowState(States.COMPANY.VERIFIED), doc: 'NVIDIA_PROFILE.pdf' }
     ];
@@ -332,6 +333,13 @@ const Store = (() => {
                         msg: n.msg, type: n.type, role: n.target_role, time: new Date(n.created_at).toLocaleTimeString()
                     }));
                 }
+
+                // 5. Users
+                const { data: usrData, error: usrErr } = await supabase.from('users').select('*');
+                if (usrErr) throw usrErr;
+                if (usrData && usrData.length > 0) {
+                    _allUsers = usrData;
+                }
             } catch (error) {
                 console.error("Supabase load failed, falling back to local storage:", error);
                 dbFailed = true;
@@ -363,6 +371,28 @@ const Store = (() => {
 
             const localNotifs = JSON.parse(localStorage.getItem('ims_notifs') || '[]');
             if (localNotifs.length > 0) _notifs = localNotifs;
+
+            const localUsers = JSON.parse(localStorage.getItem('ims_users') || '[]');
+            
+            // Inject mock DB users so offline testing has populated dropdowns
+            const mockUsers = [
+                { email: 'student@univ.edu', name: 'Alex Rivet', role: 'student', id: 'STU-001' },
+                { email: 'company@nvidia.com', name: 'NVIDIA Corp', role: 'company', id: 'CMP-001' },
+                { email: 'faculty@univ.edu', name: 'Dr. Smith', role: 'mentor', id: 'FAC-001' },
+                { email: 'hod@univ.edu', name: 'Dr. Johnson', role: 'hod', id: 'HOD-001' },
+                { email: 'tpo@univ.edu', name: 'Prof. Miller', role: 'tpo', id: 'TPO-001' },
+                { email: 'staff@univ.edu', name: 'Sarah Wilson', role: 'coordinator', id: 'STF-001' }
+            ];
+            
+            // Merge local storage users with mock users
+            const combinedUsers = [...mockUsers];
+            for (const u of localUsers) {
+                if (!combinedUsers.find(cu => cu.email === u.email)) {
+                    combinedUsers.push(u);
+                }
+            }
+            
+            _allUsers = combinedUsers;
         }
     };
 
@@ -393,6 +423,42 @@ const Store = (() => {
             _user = null;
             onReady(null);
         },
+        reload: async () => {
+            await _loadFromDB();
+        },
+        getAllUsers: () => _allUsers,
+        updateStudentMentor: async (studentEmail, mentorEmail) => {
+            // Update local cache
+            const studentIndex = _allUsers.findIndex(u => u.email === studentEmail);
+            let uData = { email: studentEmail, mentor_email: mentorEmail, role: 'student', name: studentEmail.split('@')[0] };
+            
+            if (studentIndex > -1) {
+                _allUsers[studentIndex].mentor_email = mentorEmail;
+                uData = { ..._allUsers[studentIndex] };
+            } else {
+                _allUsers.push(uData);
+            }
+
+            if (_user && _user.email === studentEmail) {
+                _user.mentor_email = mentorEmail;
+            }
+
+            // Sync with DB
+            if (supabase) {
+                const { error } = await supabase.from('users').update({ mentor_email: mentorEmail }).eq('email', studentEmail);
+                if (error) console.error("Error updating mentor:", error);
+            }
+            
+            // Sync with local storage fallback
+            const storedUsers = JSON.parse(localStorage.getItem('ims_users') || '[]');
+            const idx = storedUsers.findIndex(u => u.email === studentEmail);
+            if (idx > -1) {
+                storedUsers[idx].mentor_email = mentorEmail;
+            } else {
+                storedUsers.push(uData);
+            }
+            localStorage.setItem('ims_users', JSON.stringify(storedUsers));
+        },
         sync: (table) => _sync(table),
         save: (table) => _sync(table),
         getUser: () => _user,
@@ -410,15 +476,15 @@ const Store = (() => {
             Store.addNotif(`Internship posting ${id} was removed by Coordinator`, 'info', 'company');
             _sync('internships');
         },
-        addNotif: (msg, type = 'info', role = 'student') => {
+        addNotif: (msg, type = 'info', role = 'student', targetEmail = null) => {
             // Avoid repetition: check if the last notification for this role is already the same message
             const lastNotif = _notifs.find(n => n.role === role);
-            if (lastNotif && lastNotif.msg === msg) {
+            if (lastNotif && lastNotif.msg === msg && lastNotif.targetEmail === targetEmail) {
                 console.warn('Duplicate notification blocked:', msg);
                 return;
             }
 
-            const n = { msg, type, role, time: new Date().toLocaleTimeString(), id: Math.random() };
+            const n = { msg, type, role, time: new Date().toLocaleTimeString(), id: Math.random(), targetEmail };
             _notifs.unshift(n);
             _sync('notifications');
             GlobalNotifier.notify(n);
@@ -430,16 +496,25 @@ const Store = (() => {
             
             // Condition 1: OD applied/moved -> Notify respective staff
             if (staffRoles.includes(role) && (msg.includes('New OD request') || msg.includes('OD review needed'))) {
-                EmailService.sendToRole(role, 'IMS OD Notification', msg);
+                if (targetEmail) {
+                    EmailService.send(targetEmail, 'IMS OD Notification', msg);
+                } else {
+                    EmailService.sendToRole(role, 'IMS OD Notification', msg);
+                }
             }
             
             // Condition 2: Company added/verified -> Notify all students
             if (role === 'student' && (msg.includes('was verified by the coordinator') || msg.includes('has been verified!'))) {
                 EmailService.sendToRole('student', 'IMS Company Verified', msg);
             }
+
+            // Condition 3: Student OD Status Updates
+            if (role === 'student' && targetEmail && (msg.includes('approved') || msg.includes('GRANTED') || msg.includes('rejected'))) {
+                EmailService.send(targetEmail, 'IMS OD Status Update', msg);
+            }
         },
         getNotifs: (role) => {
-            const list = _notifs.filter(n => n.role === role);
+            const list = _notifs.filter(n => n.role === role && (!n.targetEmail || n.targetEmail === _user.email));
             // Filter out consecutive duplicates with the same message
             return list.filter((n, i) => i === 0 || n.msg !== list[i - 1].msg);
         },
@@ -463,7 +538,7 @@ const Store = (() => {
             };
             _applications.push(app);
             _sync('applications');
-            Store.addNotif(`New OD request from ${app.studentName}`, 'info', 'mentor');
+            Store.addNotif(`New OD request from ${_user.name} for ${data.company}`, 'info', 'mentor', _user.mentor_email);
             return app;
         },
         submitCompany: (data, actor = 'student') => {
@@ -744,10 +819,14 @@ const UI = {
                 const userProfile = await fetchUserFromDB(email);
 
                 Store.setUser({
-                    id: email,
+                    id: email, // Maintain id for backwards compatibility
+                    email: email, // Required for updating mentor_email live
                     name: userProfile.name,
-                    role: userProfile.role
+                    role: userProfile.role,
+                    mentor_email: userProfile.mentor_email // Important so dashboard renders correctly on login
                 });
+                
+                await Store.reload();
 
                 this.toast(`Authenticated as ${userProfile.role}`, 'success');
                 this.showScreen('dashboard');
@@ -1085,6 +1164,212 @@ const UI = {
         this.attachSubEvents();
     },
 
+    renderStudentMentorSelection() {
+        const u = Store.getUser();
+        const allUsers = Store.getAllUsers() || [];
+        const mentors = allUsers.filter(user => user.role === 'mentor');
+        
+        let html = `
+            <div class="card" style="margin-bottom: 24px; border: 1px solid var(--border); box-shadow: 0 4px 20px rgba(0,0,0,0.05); border-radius: 12px; overflow: hidden;">
+                <div class="card-header" style="background: var(--bg-light); border-bottom: 1px solid var(--border); padding: 20px 24px;">
+                    <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600; display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 1.2rem;">🧑‍🏫</span> My Mentor
+                    </h2>
+                </div>
+                <div style="padding: 24px;">
+        `;
+
+        if (u.mentor_email) {
+            const myMentor = mentors.find(m => m.email === u.mentor_email);
+            const mentorName = myMentor ? myMentor.name : u.mentor_email;
+            html += `
+                <div style="background: rgba(var(--primary-rgb), 0.05); border-left: 4px solid var(--primary); padding: 16px 20px; border-radius: 4px;">
+                    <h4 style="margin: 0 0 8px 0; color: var(--primary);">Assigned Mentor</h4>
+                    <p style="margin: 0; font-size: 1rem;"><strong>${mentorName}</strong></p>
+                    <p style="margin: 6px 0 0 0; font-size: 0.85rem; color: var(--text-muted);">All your OD requests will be routed to them for approval.</p>
+                </div>
+            `;
+        } else {
+            html += `
+                <p style="margin-top: 0; color: var(--text-muted); font-size: 0.95rem;">You haven't selected a mentor yet. Please choose one from the list below to proceed with your OD applications.</p>
+                <div style="display: flex; gap: 12px; margin-top: 16px; align-items: stretch;">
+                    <div style="flex: 1; position: relative;">
+                        <select id="student-mentor-select" class="ui-input" style="width: 100%; height: 100%; padding: 12px 16px; border-radius: 8px; appearance: none; background-color: var(--bg-light); border: 1px solid var(--border); font-size: 0.95rem; cursor: pointer;">
+                            <option value="" disabled selected>Select a Mentor...</option>
+                            ${mentors.map(m => `<option value="${m.email}">${m.name} (${m.email})</option>`).join('')}
+                        </select>
+                        <div style="position: absolute; right: 16px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--text-muted);">▼</div>
+                    </div>
+                    <button class="ui-btn ui-btn-primary btn-save-mentor" style="padding: 12px 24px; border-radius: 8px; font-weight: 600; white-space: nowrap;">Confirm Mentor</button>
+                </div>
+            `;
+        }
+
+        html += `</div></div>`;
+        return html;
+    },
+
+    renderMentorMenteesManager() {
+        const u = Store.getUser();
+        const allUsers = Store.getAllUsers() || [];
+        const allStudents = allUsers.filter(user => user.role === 'student' || (user.role && user.role.toLowerCase() === 'student'));
+        
+        const myStudents = allStudents.filter(s => s.mentor_email === u.email);
+        const otherStudents = allStudents.filter(s => s.mentor_email !== u.email);
+
+        let html = `
+            <div class="card" style="margin-bottom: 24px; border: 1px solid var(--border); box-shadow: 0 4px 20px rgba(0,0,0,0.05); border-radius: 12px; overflow: hidden;">
+                <div class="card-header" style="background: var(--bg-light); border-bottom: 1px solid var(--border); padding: 20px 24px;">
+                    <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600; display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 1.2rem;">👥</span> Manage Mentees
+                    </h2>
+                </div>
+                <div style="padding: 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
+                    
+                    <!-- Assign Students Section -->
+                    <div style="border: 1px solid var(--border); border-radius: 12px; background: var(--bg-main); display: flex; flex-direction: column;">
+                        <div style="padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--bg-light); border-radius: 12px 12px 0 0;">
+                            <h3 style="margin: 0; font-size: 1.05rem;">Available Students</h3>
+                            <p style="margin: 4px 0 0 0; font-size: 0.8rem; color: var(--text-muted);">Select registered students to add to your group.</p>
+                        </div>
+                        <div style="padding: 16px; flex: 1; overflow-y: auto; max-height: 250px;">
+                            ${otherStudents.length === 0 ? '<div style="text-align:center; padding: 20px; color: var(--text-muted); font-size: 0.9rem;">No other registered students found in the database.</div>' : ''}
+                            <div class="student-checkbox-list" style="display: flex; flex-direction: column; gap: 8px;">
+                                ${otherStudents.map(s => `
+                                    <label style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='var(--bg-light)'" onmouseout="this.style.background='transparent'">
+                                        <input type="checkbox" class="mentor-add-checkbox" value="${s.email}" style="width: 18px; height: 18px; accent-color: var(--primary);">
+                                        <div style="display: flex; flex-direction: column;">
+                                            <span style="font-size: 0.95rem; font-weight: 500;">
+                                                ${s.name} 
+                                                ${(s.mentor_email && s.mentor_email !== 'null' && s.mentor_email !== '') ? `<span style="margin-left: 6px; font-size: 0.7rem; background: rgba(0,0,0,0.05); padding: 2px 6px; border-radius: 10px; color: var(--text-muted);">Assigned</span>` : ''}
+                                            </span>
+                                            <span style="font-size: 0.75rem; color: var(--text-muted);">${s.email}</span>
+                                        </div>
+                                    </label>
+                                `).join('')}
+                            </div>
+                        </div>
+                        <div style="padding: 16px; border-top: 1px solid var(--border);">
+                            <button class="ui-btn ui-btn-primary btn-add-students" style="width: 100%; border-radius: 8px; font-weight: 600;">+ Assign Selected</button>
+                        </div>
+                    </div>
+
+                    <!-- Current Mentees Section -->
+                    <div style="border: 1px solid var(--border); border-radius: 12px; background: var(--bg-main); display: flex; flex-direction: column;">
+                        <div style="padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--bg-light); border-radius: 12px 12px 0 0;">
+                            <h3 style="margin: 0; font-size: 1.05rem; display: flex; justify-content: space-between; align-items: center;">
+                                My Mentorship Group 
+                                <span style="background: var(--primary); color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem;">${myStudents.length}</span>
+                            </h3>
+                            <p style="margin: 4px 0 0 0; font-size: 0.8rem; color: var(--text-muted);">Students currently under your supervision.</p>
+                        </div>
+                        <div style="padding: 16px; flex: 1; overflow-y: auto; max-height: 250px;">
+                            ${myStudents.length === 0 ? '<div style="text-align:center; padding: 20px; color: var(--text-muted); font-size: 0.9rem;">No students assigned yet.</div>' : ''}
+                            <div style="display: flex; flex-direction: column; gap: 8px;">
+                                ${myStudents.map(s => `
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg);">
+                                        <div style="display: flex; flex-direction: column;">
+                                            <span style="font-size: 0.95rem; font-weight: 500;">${s.name}</span>
+                                            <span style="font-size: 0.75rem; color: var(--text-muted);">${s.email}</span>
+                                        </div>
+                                        <button class="btn-remove-student" data-email="${s.email}" title="Remove" style="background: rgba(255,59,48,0.1); color: var(--danger); border: none; width: 32px; height: 32px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,59,48,0.2)'" onmouseout="this.style.background='rgba(255,59,48,0.1)'">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                                        </button>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        `;
+        return html;
+    },
+
+    renderMentorReports() {
+        const u = Store.getUser();
+        const allUsers = Store.getAllUsers() || [];
+        const myStudents = allUsers.filter(s => s.role === 'student' && s.mentor_email === u.email);
+        
+        let html = `
+            <div class="form-card" style="margin-bottom: 20px; padding: 30px; border-radius: 16px; background: linear-gradient(145deg, #ffffff, #f8f9fa); box-shadow: 0 8px 30px rgba(0,0,0,0.04); border: 1px solid rgba(0,0,0,0.05);">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:25px;">
+                    <div>
+                        <h3 style="color:var(--primary); margin:0 0 8px 0; font-size: 1.4rem; display:flex; align-items:center; gap:10px;">
+                            <span style="background: rgba(10, 37, 64, 0.1); padding: 8px; border-radius: 10px; display:flex;">
+                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+                            </span>
+                            Mentorship Performance Report
+                        </h3>
+                        <p style="font-size:0.9rem; color:var(--text-muted); margin:0;">
+                            Generate and download comprehensive Excel reports detailing the OD approval status for students under your supervision.
+                        </p>
+                    </div>
+                </div>
+
+                <div style="display:flex; gap:15px; align-items:center; margin-bottom:30px; background:white; padding:20px; border-radius:12px; box-shadow: 0 4px 15px rgba(0,0,0,0.02); border:1px solid rgba(0,0,0,0.03);">
+                    <div style="flex:1; max-width:400px; position: relative;">
+                        <select id="mentor-report-select" class="ui-input" style="width:100%; background:var(--bg-light); border: 2px solid transparent; border-radius: 8px; padding: 12px 16px; font-weight: 500; cursor: pointer; transition: all 0.2s ease;">
+                            <option value="ALL">All My Students</option>
+                            ${myStudents.map(s => `<option value="${s.email}">${s.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    <button class="ui-btn ui-btn-primary btn-generate-report" style="white-space:nowrap; padding:12px 24px; font-weight:600; border-radius:8px; box-shadow: 0 4px 10px rgba(10,37,64,0.15); transition: transform 0.2s ease, box-shadow 0.2s ease;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 15px rgba(10,37,64,0.2)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 10px rgba(10,37,64,0.15)'">Generate Report</button>
+                    <div id="mentor-report-actions" style="margin-left:auto;"></div>
+                </div>
+                <div id="mentor-report-output" style="margin-top:20px; min-height:120px; background: rgba(0,0,0,0.01); border:2px dashed rgba(0,0,0,0.08); border-radius:12px; padding:30px; text-align:center; display:flex; align-items:center; justify-content:center; transition: all 0.3s ease;">
+                    <div style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.5;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                        <p style="color:var(--text-muted); font-size:0.95rem; font-weight: 500; margin:0;">Select students and click Generate Report to view OD statistics.</p>
+                    </div>
+                </div>
+            </div>
+        `;
+        return html;
+    },
+
+    renderHODReports() {
+        const allUsers = Store.getAllUsers() || [];
+        const mentors = allUsers.filter(user => user.role === 'mentor');
+        
+        let html = `
+            <div class="form-card" style="margin-bottom: 20px; padding: 30px; border-radius: 16px; background: linear-gradient(145deg, #ffffff, #f8f9fa); box-shadow: 0 8px 30px rgba(0,0,0,0.04); border: 1px solid rgba(0,0,0,0.05);">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:25px;">
+                    <div>
+                        <h3 style="color:var(--primary); margin:0 0 8px 0; font-size: 1.4rem; display:flex; align-items:center; gap:10px;">
+                            <span style="background: rgba(10, 37, 64, 0.1); padding: 8px; border-radius: 10px; display:flex;">
+                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+                            </span>
+                            Department Mentorship Reports
+                        </h3>
+                        <p style="font-size:0.9rem; color:var(--text-muted); margin:0;">
+                            Generate and download department-wide Excel reports aggregating OD progress across all mentor groups.
+                        </p>
+                    </div>
+                </div>
+
+                <div style="display:flex; gap:15px; align-items:center; margin-bottom:30px; background:white; padding:20px; border-radius:12px; box-shadow: 0 4px 15px rgba(0,0,0,0.02); border:1px solid rgba(0,0,0,0.03);">
+                    <div style="flex:1; max-width:400px; position: relative;">
+                        <select id="hod-mentor-select" class="ui-input" style="width:100%; background:var(--bg-light); border: 2px solid transparent; border-radius: 8px; padding: 12px 16px; font-weight: 500; cursor: pointer; transition: all 0.2s ease;">
+                            <option value="" disabled selected>Select a Mentor...</option>
+                            ${mentors.map(m => `<option value="${m.email}">${m.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    <button class="ui-btn ui-btn-primary btn-generate-hod-report" style="white-space:nowrap; padding:12px 24px; font-weight:600; border-radius:8px; box-shadow: 0 4px 10px rgba(10,37,64,0.15); transition: transform 0.2s ease, box-shadow 0.2s ease;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 15px rgba(10,37,64,0.2)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 10px rgba(10,37,64,0.15)'">Generate Report</button>
+                    <div id="hod-report-actions" style="margin-left:auto;"></div>
+                </div>
+                <div id="hod-report-output" style="margin-top:20px; min-height:120px; background: rgba(0,0,0,0.01); border:2px dashed rgba(0,0,0,0.08); border-radius:12px; padding:30px; text-align:center; display:flex; align-items:center; justify-content:center; transition: all 0.3s ease;">
+                    <div style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.5;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                        <p style="color:var(--text-muted); font-size:0.95rem; font-weight: 500; margin:0;">Select a mentor to view their students' aggregated OD progress.</p>
+                    </div>
+                </div>
+            </div>
+        `;
+        return html;
+    },
+
     renderStudentSubform() {
         const u = Store.getUser();
         const studentComps = Store.getCompanies().filter(c => c.submittedByRole === 'student' && c.submittedBy === u.id);
@@ -1203,13 +1488,17 @@ const UI = {
         `;
 
         if (u.role === 'student') {
+            html += this.renderStudentMentorSelection();
             html += this.renderStudentSubform();
+        } else if (u.role === 'mentor') {
+            html += this.renderMentorMenteesManager();
+            html += this.renderApproverQueue();
+        } else if (u.role === 'hod') {
+            html += this.renderApproverQueue();
         } else if (u.role === 'coordinator') {
             html += this.renderCoordinatorReview();
             html += this.renderApproverQueue(); // Coordinators can now see/monitor the OD queue
         } else if (u.role === 'tpo') {
-            html += this.renderApproverQueue();
-        } else {
             html += this.renderApproverQueue();
         }
 
@@ -1267,27 +1556,41 @@ const UI = {
     },
 
     renderAnalytics(container) {
+        const u = Store.getUser();
         const comps = Store.getCompanies();
         const apps = Store.getApplications();
         const verifiedCount = comps.filter(c => c.state.current === States.COMPANY.VERIFIED).length;
         const grantedCount = apps.filter(a => a.state.current === States.OD.GRANTED).length;
 
-        container.innerHTML = `
+        let html = `
             <div class="dashboard-grid">
                 <div class="metric-card"><div class="metric-label">Institutional Partners</div><div class="metric-value">${comps.length}</div><p style="font-size:0.7rem;">${verifiedCount} Verified</p></div>
                 <div class="metric-card"><div class="metric-label">OD Throughput</div><div class="metric-value">${apps.length}</div><p style="font-size:0.7rem;">${grantedCount} Granted</p></div>
                 <div class="metric-card"><div class="metric-label">Success Rate</div><div class="metric-value">${Math.round((grantedCount / (apps.length || 1)) * 100)}%</div></div>
             </div>
-            <div class="form-card" style="max-width:100%;">
-                <h3>Monthly Approval Distribution</h3>
-                <div style="display:flex; align-items:flex-end; gap:20px; height:200px; margin-top:30px; padding-bottom:20px; border-bottom:2px solid var(--border);">
-                    <div style="flex:1; background:var(--primary); height:40%; border-radius:4px 4px 0 0; position:relative;"><span style="position:absolute; top:-20px; width:100%; text-align:center; font-size:0.7rem;">Jan</span></div>
-                    <div style="flex:1; background:var(--primary); height:65%; border-radius:4px 4px 0 0; position:relative;"><span style="position:absolute; top:-20px; width:100%; text-align:center; font-size:0.7rem;">Feb</span></div>
-                    <div style="flex:1; background:var(--accent); height:90%; border-radius:4px 4px 0 0; position:relative;"><span style="position:absolute; top:-20px; width:100%; text-align:center; font-size:0.7rem;">Mar</span></div>
-                    <div style="flex:1; background:var(--primary); height:55%; border-radius:4px 4px 0 0; position:relative;"><span style="position:absolute; top:-20px; width:100%; text-align:center; font-size:0.7rem;">Apr</span></div>
+            <div class="form-card" style="max-width:100%; margin-bottom:20px;">
+                <h3 style="margin-bottom: 25px;">Monthly Approval Distribution</h3>
+                <div style="display:flex; align-items:flex-end; gap:2%; height:220px; margin-top:10px; padding-bottom:30px; border-bottom:2px solid var(--border);">
+                    <div style="flex:1; background:linear-gradient(to top, var(--primary), rgba(10,37,64,0.6)); height:40%; border-radius:6px 6px 0 0; position:relative; box-shadow:0 4px 15px rgba(0,0,0,0.1); transition: height 0.5s ease;"><span style="position:absolute; bottom:-25px; width:100%; text-align:center; font-size:0.75rem; font-weight:600; color:var(--text-muted);">Jan</span><span style="position:absolute; top:-25px; width:100%; text-align:center; font-size:0.8rem; font-weight:700;">40</span></div>
+                    <div style="flex:1; background:linear-gradient(to top, var(--primary), rgba(10,37,64,0.6)); height:65%; border-radius:6px 6px 0 0; position:relative; box-shadow:0 4px 15px rgba(0,0,0,0.1); transition: height 0.5s ease;"><span style="position:absolute; bottom:-25px; width:100%; text-align:center; font-size:0.75rem; font-weight:600; color:var(--text-muted);">Feb</span><span style="position:absolute; top:-25px; width:100%; text-align:center; font-size:0.8rem; font-weight:700;">65</span></div>
+                    <div style="flex:1; background:linear-gradient(to top, var(--accent), rgba(0,210,255,0.6)); height:90%; border-radius:6px 6px 0 0; position:relative; box-shadow:0 4px 15px rgba(0,210,255,0.2); transition: height 0.5s ease;"><span style="position:absolute; bottom:-25px; width:100%; text-align:center; font-size:0.75rem; font-weight:600; color:var(--text-muted);">Mar</span><span style="position:absolute; top:-25px; width:100%; text-align:center; font-size:0.8rem; font-weight:700;">90</span></div>
+                    <div style="flex:1; background:linear-gradient(to top, var(--primary), rgba(10,37,64,0.6)); height:55%; border-radius:6px 6px 0 0; position:relative; box-shadow:0 4px 15px rgba(0,0,0,0.1); transition: height 0.5s ease;"><span style="position:absolute; bottom:-25px; width:100%; text-align:center; font-size:0.75rem; font-weight:600; color:var(--text-muted);">Apr</span><span style="position:absolute; top:-25px; width:100%; text-align:center; font-size:0.8rem; font-weight:700;">55</span></div>
+                    <div style="flex:1; background:linear-gradient(to top, var(--primary), rgba(10,37,64,0.6)); height:75%; border-radius:6px 6px 0 0; position:relative; box-shadow:0 4px 15px rgba(0,0,0,0.1); transition: height 0.5s ease;"><span style="position:absolute; bottom:-25px; width:100%; text-align:center; font-size:0.75rem; font-weight:600; color:var(--text-muted);">May</span><span style="position:absolute; top:-25px; width:100%; text-align:center; font-size:0.8rem; font-weight:700;">75</span></div>
+                    <div style="flex:1; background:linear-gradient(to top, var(--primary), rgba(10,37,64,0.6)); height:45%; border-radius:6px 6px 0 0; position:relative; box-shadow:0 4px 15px rgba(0,0,0,0.1); transition: height 0.5s ease;"><span style="position:absolute; bottom:-25px; width:100%; text-align:center; font-size:0.75rem; font-weight:600; color:var(--text-muted);">Jun</span><span style="position:absolute; top:-25px; width:100%; text-align:center; font-size:0.8rem; font-weight:700;">45</span></div>
                 </div>
             </div>
         `;
+        
+        if (u.role === 'mentor') {
+            html += this.renderMentorReports();
+        } else if (u.role === 'hod') {
+            html += this.renderHODReports();
+        }
+
+        container.innerHTML = html;
+        if (u.role === 'mentor' || u.role === 'hod') {
+            this.attachSubEvents();
+        }
     },
 
     renderCoordinatorReview() {
@@ -1321,7 +1624,13 @@ const UI = {
         const u = Store.getUser();
         const activeApps = Store.getApplications().filter(a => {
             if (u.role === 'coordinator') return true; // Coordinators see everything as monitors
-            if (u.role === 'mentor') return a.state.current === States.OD.PENDING_MENTOR;
+            if (u.role === 'mentor') {
+                if (a.state.current !== States.OD.PENDING_MENTOR) return false;
+                const allUsers = Store.getAllUsers() || [];
+                // In early mockDB student might be email, in real DB it's UUID
+                const appStudent = allUsers.find(student => student.id === a.student || student.email === a.student || student.name === a.studentName);
+                return appStudent && appStudent.mentor_email === u.email;
+            }
             if (u.role === 'hod') return a.state.current === States.OD.PENDING_HOD;
             if (u.role === 'tpo') return a.state.current === States.OD.PENDING_TPO;
             return false;
@@ -1515,6 +1824,169 @@ const UI = {
 
     attachSubEvents() {
         const u = Store.getUser();
+
+        // ----------------------------------------------------------------
+        // MENTORSHIP WIDGET EVENTS
+        // ----------------------------------------------------------------
+        const btnSaveMentor = document.querySelector('.btn-save-mentor');
+        if (btnSaveMentor) {
+            btnSaveMentor.onclick = async () => {
+                const select = document.getElementById('student-mentor-select');
+                const mentorEmail = select.value;
+                if (!mentorEmail) {
+                    this.toast("Please select a mentor.", "warning");
+                    return;
+                }
+                this.toast("Assigning Mentor...", "info");
+                await Store.updateStudentMentor(u.email, mentorEmail);
+                this.toast("Mentor successfully assigned!", "success");
+                this.renderView('overview');
+            };
+        }
+
+        const btnAddStudents = document.querySelector('.btn-add-students');
+        if (btnAddStudents) {
+            btnAddStudents.onclick = async () => {
+                const checkboxes = document.querySelectorAll('.mentor-add-checkbox:checked');
+                const selectedEmails = Array.from(checkboxes).map(cb => cb.value);
+                if (selectedEmails.length === 0) {
+                    this.toast("Select at least one student.", "warning");
+                    return;
+                }
+                this.toast("Assigning Students...", "info");
+                for (const email of selectedEmails) {
+                    await Store.updateStudentMentor(email, u.email);
+                }
+                this.toast(`Successfully added ${selectedEmails.length} student(s)!`, "success");
+                this.renderView('overview');
+            };
+        }
+
+        const btnsRemoveStudent = document.querySelectorAll('.btn-remove-student');
+        btnsRemoveStudent.forEach(btn => {
+            btn.onclick = async () => {
+                const email = btn.dataset.email;
+                if (confirm(`Remove student ${email} from your group?`)) {
+                    this.toast("Removing student...", "info");
+                    await Store.updateStudentMentor(email, null);
+                    this.toast("Student removed.", "success");
+                    this.renderView('overview');
+                }
+            };
+        });
+
+        const btnGenMentorReport = document.querySelector('.btn-generate-report');
+        if (btnGenMentorReport) {
+            btnGenMentorReport.onclick = () => {
+                const select = document.getElementById('mentor-report-select');
+                const selected = select.value;
+                const output = document.getElementById('mentor-report-output');
+                const actions = document.getElementById('mentor-report-actions');
+                
+                const allUsers = Store.getAllUsers();
+                const apps = Store.getApplications();
+                
+                let targetStudents = allUsers.filter(s => s.role === 'student' && s.mentor_email === u.email);
+                if (selected !== 'ALL') {
+                    targetStudents = targetStudents.filter(s => s.email === selected);
+                }
+
+                let html = `<table class="ui-table" style="width:100%; text-align:left; border-collapse:collapse;">
+                    <thead><tr><th style="padding:10px; border-bottom:2px solid var(--border);">Student</th><th style="padding:10px; border-bottom:2px solid var(--border);">Company</th><th style="padding:10px; border-bottom:2px solid var(--border);">Status</th></tr></thead>
+                    <tbody>`;
+                
+                let csvRows = [["Student Name", "Company", "OD Status"]];
+                
+                targetStudents.forEach(student => {
+                    const sApps = apps.filter(a => a.student === student.id || a.studentName === student.name);
+                    if (sApps.length === 0) {
+                        html += `<tr><td style="padding:10px; border-bottom:1px solid var(--border);">${student.name}</td><td colspan="2" style="padding:10px; border-bottom:1px solid var(--border); color:var(--text-muted)">No applications</td></tr>`;
+                        csvRows.push([student.name, "N/A", "No applications"]);
+                    } else {
+                        sApps.forEach(a => {
+                            html += `<tr><td style="padding:10px; border-bottom:1px solid var(--border);">${student.name}</td><td style="padding:10px; border-bottom:1px solid var(--border);">${a.company}</td><td style="padding:10px; border-bottom:1px solid var(--border);"><span class="badge badge-${a.state.current.toLowerCase().includes('granted') ? 'success' : a.state.current.includes('Rejected') ? 'danger' : 'pending'}">${a.state.current}</span></td></tr>`;
+                            csvRows.push([student.name, a.company, a.state.current]);
+                        });
+                    }
+                });
+
+                html += `</tbody></table>`;
+                
+                output.style.display = 'block';
+                output.style.textAlign = 'left';
+                output.innerHTML = html;
+
+                const csvContent = csvRows.map(e => e.map(cell => `"${cell}"`).join(",")).join("\n");
+                actions.innerHTML = `<button class="ui-btn ui-btn-ghost btn-download-excel" style="color:#217346; border-color:#217346; padding:10px 20px; font-weight:600; white-space:nowrap;">⬇️ Download Excel</button>`;
+                
+                actions.querySelector('.btn-download-excel').onclick = () => {
+                    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    link.setAttribute("href", url);
+                    link.setAttribute("download", `Mentorship_Report_${new Date().toISOString().split('T')[0]}.csv`);
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                };
+            };
+        }
+
+        const btnGenHodReport = document.querySelector('.btn-generate-hod-report');
+        if (btnGenHodReport) {
+            btnGenHodReport.onclick = () => {
+                const select = document.getElementById('hod-mentor-select');
+                const mentorEmail = select.value;
+                if (!mentorEmail) return;
+
+                const output = document.getElementById('hod-report-output');
+                const actions = document.getElementById('hod-report-actions');
+                const allUsers = Store.getAllUsers();
+                const apps = Store.getApplications();
+                
+                const targetStudents = allUsers.filter(s => s.role === 'student' && s.mentor_email === mentorEmail);
+                const mentor = allUsers.find(u => u.email === mentorEmail);
+
+                let html = `<h4 style="margin-bottom:15px; color:var(--primary);">Report for Mentor: ${mentor.name}</h4>`;
+                html += `<table class="ui-table" style="width:100%; text-align:left; border-collapse:collapse;">
+                    <thead><tr><th style="padding:10px; border-bottom:2px solid var(--border);">Student</th><th style="padding:10px; border-bottom:2px solid var(--border);">Company</th><th style="padding:10px; border-bottom:2px solid var(--border);">Status</th></tr></thead>
+                    <tbody>`;
+                
+                let csvRows = [["Student Name", "Company", "OD Status"]];
+                
+                targetStudents.forEach(student => {
+                    const sApps = apps.filter(a => a.student === student.id || a.studentName === student.name);
+                    if (sApps.length === 0) {
+                        html += `<tr><td style="padding:10px; border-bottom:1px solid var(--border);">${student.name}</td><td colspan="2" style="padding:10px; border-bottom:1px solid var(--border); color:var(--text-muted)">No applications</td></tr>`;
+                        csvRows.push([student.name, "N/A", "No applications"]);
+                    } else {
+                        sApps.forEach(a => {
+                            html += `<tr><td style="padding:10px; border-bottom:1px solid var(--border);">${student.name}</td><td style="padding:10px; border-bottom:1px solid var(--border);">${a.company}</td><td style="padding:10px; border-bottom:1px solid var(--border);"><span class="badge badge-${a.state.current.toLowerCase().includes('granted') ? 'success' : a.state.current.includes('Rejected') ? 'danger' : 'pending'}">${a.state.current}</span></td></tr>`;
+                            csvRows.push([student.name, a.company, a.state.current]);
+                        });
+                    }
+                });
+
+                html += `</tbody></table>`;
+                output.style.display = 'block';
+                output.style.textAlign = 'left';
+                output.innerHTML = html;
+
+                const csvContent = csvRows.map(e => e.map(cell => `"${cell}"`).join(",")).join("\n");
+                actions.innerHTML = `<button class="ui-btn ui-btn-ghost btn-download-excel-hod" style="color:#217346; border-color:#217346; padding:10px 20px; font-weight:600; white-space:nowrap;">⬇️ Download Excel</button>`;
+                
+                actions.querySelector('.btn-download-excel-hod').onclick = () => {
+                    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    link.setAttribute("href", url);
+                    link.setAttribute("download", `HOD_Mentorship_Report_${mentor.name.replace(/\s+/g, '_')}.csv`);
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                };
+            };
+        }
 
         // OD Submission (Dashboard modal version)
         const odForm = document.getElementById('od-submit-form');
@@ -1834,16 +2306,21 @@ const UI = {
                 if (u.role === 'mentor') {
                     this.toast('Approved ✓ — Forwarded to HOD', 'success');
                     Store.addNotif(`📋 OD review needed: ${app.studentName} @ ${app.company} (approved by Mentor)`, 'info', 'hod');
-                    Store.addNotif(`✅ Your OD for ${app.company} was approved by your Mentor — now pending HOD`, 'success', 'student');
+                    Store.addNotif(`✅ Your OD for ${app.company} was approved by your Mentor — now pending HOD`, 'success', 'student', app.student);
                 } else if (u.role === 'hod') {
                     this.toast('Approved ✓ — Forwarded to TPO', 'success');
                     Store.addNotif(`📋 OD review needed: ${app.studentName} @ ${app.company} (approved by HOD)`, 'info', 'tpo');
-                    Store.addNotif(`✅ Your OD for ${app.company} was approved by HOD — now pending TPO`, 'success', 'student');
+                    Store.addNotif(`✅ Your OD for ${app.company} was approved by HOD — now pending TPO`, 'success', 'student', app.student);
                 } else if (u.role === 'tpo') {
                     this.toast('🎉 OD Fully Granted!', 'success');
-                    Store.addNotif(`🎉 Your OD application for ${app.company} has been FULLY GRANTED!`, 'success', 'student');
+                    Store.addNotif(`🎉 Your OD application for ${app.company} has been FULLY GRANTED!`, 'success', 'student', app.student);
                     Store.addNotif(`✅ OD for ${app.studentName} @ ${app.company} granted by TPO`, 'success', 'coordinator');
-                    Store.addNotif(`✅ OD for ${app.studentName} @ ${app.company} granted by TPO`, 'success', 'mentor');
+                    
+                    const allUsers = Store.getAllUsers() || [];
+                    const studentUser = allUsers.find(stu => stu.id === app.student || stu.email === app.student);
+                    const mentorEmail = studentUser ? studentUser.mentor_email : null;
+                    
+                    Store.addNotif(`✅ OD for ${app.studentName} @ ${app.company} granted by TPO`, 'success', 'mentor', mentorEmail);
                     Store.addNotif(`✅ OD for ${app.studentName} @ ${app.company} granted by TPO`, 'success', 'hod');
                 }
 
@@ -1862,7 +2339,7 @@ const UI = {
 
                 document.getElementById('modal-overlay').remove();
                 this.toast('Application rejected', 'danger');
-                Store.addNotif(`❌ Your OD for ${app.company} was rejected by ${u.role.toUpperCase()}${cmd !== 'Rejected by reviewer' ? ' — Reason: ' + cmd : ''}`, 'danger', 'student');
+                Store.addNotif(`❌ Your OD for ${app.company} was rejected by ${u.role.toUpperCase()}${cmd !== 'Rejected by reviewer' ? ' — Reason: ' + cmd : ''}`, 'danger', 'student', app.student);
                 this.renderView('applications');
             };
         }

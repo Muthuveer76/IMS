@@ -8,11 +8,12 @@
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS users (
-    id          UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    email       TEXT UNIQUE NOT NULL,
-    name        TEXT NOT NULL,
-    role        TEXT NOT NULL CHECK (role IN ('student', 'mentor', 'hod', 'tpo', 'coordinator', 'company')),
-    created_at  TIMESTAMPTZ DEFAULT NOW()
+    id           UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    email        TEXT UNIQUE NOT NULL,
+    name         TEXT NOT NULL,
+    role         TEXT NOT NULL CHECK (role IN ('student', 'mentor', 'hod', 'tpo', 'coordinator', 'company')),
+    mentor_email TEXT DEFAULT NULL,
+    created_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS companies (
