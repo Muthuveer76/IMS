@@ -72,8 +72,8 @@ const EmailService = {
 // ==========================================
 // SUPABASE INTEGRATION
 // ==========================================
-const SUPABASE_URL = "https://lnutvukrbalberwyctau.supabase.co";
-const SUPABASE_KEY = "sb_publishable_vzaTQNQ96x0AO_KkOMGACg_EMOL6JVN";
+const SUPABASE_URL = "https://gbnopslgmivnzagftmkr.supabase.co";
+const SUPABASE_KEY = "sb_publishable_NEkKd3HGgVtqTQEP6bse8g_wDLKpDpu";
 const supabase = (typeof window !== 'undefined' && window.supabase) ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
 /**
